@@ -34,7 +34,6 @@ fn build_std_genotype_matrix(pgen: &Pgen) -> (Mat<f64>, usize) {
     let n_samples = pgen.n_samples();
     let n_vars = pgen.variants.len();
 
-    // Compute allele frequencies and filter out monomorphic variants.
     let mut valid_cols: Vec<(usize, f64, f64)> = Vec::new(); // (vi, mean, scale)
     for vi in 0..n_vars {
         let mut sum = 0u32;
@@ -89,7 +88,6 @@ fn build_grm(geno: &Mat<f64>, m_eff: usize) -> Mat<f64> {
     let n_samples = geno.nrows();
     let m = m_eff as f64;
     let mut grm_mat = Mat::<f64>::zeros(n_samples, n_samples);
-    // X * X^T via faer matrix multiply.
     faer::linalg::matmul::matmul(
         grm_mat.as_mut(),
         faer::Accum::Add,
@@ -101,14 +99,7 @@ fn build_grm(geno: &Mat<f64>, m_eff: usize) -> Mat<f64> {
     grm_mat
 }
 
-/// Run PCA on the PLINK1 binary fileset and write outputs to `eigenvec_out`
-/// and `eigenval_out`.
-///
-/// # Arguments
-/// - `pgen`         — loaded PLINK1 fileset
-/// - `n_pcs`        — number of principal components to report
-/// - `eigenvec_out` — writer for `.eigenvec` tab-separated output
-/// - `eigenval_out` — writer for `.eigenval` output (one value per line)
+/// Run PCA on the PLINK1 binary fileset, writing `.eigenvec` and `.eigenval` outputs.
 pub fn run_pca<W1, W2>(
     pgen: &Pgen,
     n_pcs: usize,
@@ -126,29 +117,25 @@ where
     anyhow::ensure!(m_eff > 0, "no polymorphic variants found in PLINK fileset");
     let grm_mat = build_grm(&geno, m_eff);
 
-    // EVD of the symmetric GRM. faer sorts eigenvalues in *nondecreasing* order.
-    // SelfAdjointEigen exposes U() (eigenvectors) and S() (diagonal eigenvalues).
+    // faer sorts eigenvalues in *nondecreasing* order; we reverse to get PC1 first.
     let evd = grm_mat
         .self_adjoint_eigen(Side::Lower)
         .map_err(|e| anyhow::anyhow!("EVD failed: {e:?}"))?;
 
-    let eig_s = evd.S(); // DiagRef of eigenvalues, nondecreasing
-    let eig_u = evd.U(); // MatRef of eigenvectors, column j = eigenvector for eigenvalue j
+    let eig_s = evd.S();
+    let eig_u = evd.U();
 
-    let total = eig_u.nrows(); // = n_samples; eigenvalues are in nondecreasing order
     // PC1 = largest eigenvalue → column `total - 1`; PC2 = column `total - 2`; etc.
+    let total = eig_u.nrows();
 
-    // Write eigenvalues (descending).
     let evals: Vec<f64> = eig_s.column_vector().iter().copied().collect();
     for &ev in evals.iter().rev().take(n_pcs_actual) {
         writeln!(eigenval_out, "{ev:.6}")?;
     }
 
-    // Header: #FID IID PC1 PC2 ...
     let pc_header: Vec<String> = (1..=n_pcs_actual).map(|i| format!("PC{i}")).collect();
     writeln!(eigenvec_out, "#FID\tIID\t{}", pc_header.join("\t"))?;
 
-    // Each row = one sample's PC scores.
     for si in 0..n_samples {
         let sample = &pgen.samples[si];
         let scores: Vec<String> = (0..n_pcs_actual)
